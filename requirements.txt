@@ -1,0 +1,11 @@
+scapy
+pyshark
+matplotlib
+networkx
+pygame
+pyusb
+bluepy
+scapy-ssl_tls
+python-nmap
+requests
+dnspython

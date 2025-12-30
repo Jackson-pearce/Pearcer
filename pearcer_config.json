@@ -1,0 +1,34 @@
+{
+    "interface": "\\Device\\NPF_Loopback",
+    "filter": "",
+    "blacklist_ips": [
+        "8.8.8.8"
+    ],
+    "whitelist_ips": [],
+    "attack_threshold": 50,
+    "highlight_colors": {
+        "normal": "#FFFFFF",
+        "suspicious": "#FFA500",
+        "attack": "#FF0000",
+        "voip": "#0000FF",
+        "encrypted": "#008000",
+        "http": "#800080",
+        "tls": "#00FFFF"
+    },
+    "log_file": "packets.log",
+    "pcap_file": "capture.pcap",
+    "speed": "extreme",
+    "theme": "dark",
+    "protocols": {
+        "tcp": true,
+        "udp": true,
+        "icmp": true,
+        "dccp": true,
+        "tls": true,
+        "http": true,
+        "quic": true,
+        "websocket": true,
+        "sip": true
+    },
+    "filter_mode": "All traffic"
+}
