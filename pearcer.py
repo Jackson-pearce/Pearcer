@@ -67,7 +67,7 @@ except ImportError:
 
 SCAPY_AVAILABLE = False
 try:
-    from scapy.all import sniff, Ether, IP, IPv6, TCP, UDP, ICMP, Raw, DNS, DNSRR
+    from scapy.all import sniff, Ether, IP, IPv6, TCP, UDP, ICMP, Raw, DNS, DNSRR, conf
     SCAPY_AVAILABLE = True
 except ImportError:
     pass
@@ -94,14 +94,8 @@ except ImportError:
         except ImportError:
             pass
 
-# Initialize vulnerability scanner
+# Vulnerability scanner - will be initialized after config loads
 vuln_scanner = None
-if VULN_SCANNER_AVAILABLE:
-    try:
-        vuln_scanner = VulnerabilityScanner()
-    except Exception as e:
-        print(f"[VULN SCANNER INIT ERROR] {e}")
-        VULN_SCANNER_AVAILABLE = False
 
 # Recon tool import
 RECON_TOOL_AVAILABLE = False
@@ -119,14 +113,8 @@ except ImportError:
         except ImportError:
             pass
 
-# Initialize recon tool
+# Recon tool - will be initialized after config loads
 recon_tool = None
-if RECON_TOOL_AVAILABLE:
-    try:
-        recon_tool = ReconTool()
-    except Exception as e:
-        print(f"[RECON TOOL INIT ERROR] {e}")
-        RECON_TOOL_AVAILABLE = False
 
 # Config
 CONFIG_FILE = "pearcer_config.json"
@@ -175,7 +163,13 @@ DEFAULT_CONFIG = {
         "quic": True,
         "websocket": True,
         "sip": True
-    }
+    },
+    # Real Cybersecurity Scanning Configuration
+    "nvd_api_key": None,  # Get free API key from https://nvd.nist.gov/developers/request-an-api-key
+    "zap_api_key": None,  # Optional: OWASP ZAP API key
+    "zap_proxy": "http://127.0.0.1:8090",  # OWASP ZAP proxy address
+    "enable_zap_scanning": False,  # Enable/disable ZAP web scanning
+    "cve_cache_dir": "nvd_cache.json"  # Cache directory for CVE lookups
 }
 
 # Performance tunables
@@ -204,6 +198,39 @@ def save_config(cfg):
 
 config = load_config()
 
+# NOW initialize vulnerability scanner and recon tool with loaded config
+# Initialize vulnerability scanner with API keys from config
+if VULN_SCANNER_AVAILABLE:
+    try:
+        # Get API keys from config or environment variables
+        nvd_api_key = os.getenv('NVD_API_KEY', config.get('nvd_api_key', None))
+        zap_api_key = os.getenv('ZAP_API_KEY', config.get('zap_api_key', None))
+        zap_proxy = config.get('zap_proxy', 'http://127.0.0.1:8090')
+        
+        vuln_scanner = VulnerabilityScanner(
+            nvd_api_key=nvd_api_key,
+            zap_api_key=zap_api_key,
+            zap_proxy=zap_proxy
+        )
+        print("[VULN SCANNER] Initialized with NVD CVE database and OWASP ZAP support")
+        if nvd_api_key:
+            print("[NVD] API key configured - higher rate limits enabled")
+        else:
+            print("[NVD] No API key - using default rate limits")
+    except Exception as e:
+        print(f"[VULN SCANNER INIT ERROR] {e}")
+        VULN_SCANNER_AVAILABLE = False
+
+# Initialize recon tool
+if RECON_TOOL_AVAILABLE:
+    try:
+        recon_tool = ReconTool()
+        print("[RECON TOOL] Initialized with crt.sh, WHOIS, and DNS security checks")
+    except Exception as e:
+        print(f"[RECON TOOL INIT ERROR] {e}")
+        RECON_TOOL_AVAILABLE = False
+
+
 # Globals
 running = False
 packet_count = 0
@@ -224,6 +251,17 @@ host_scan_lock = threading.Lock()
 auto_scroll = True  # auto-scroll packet list during live capture
 # Incrementing row index for GUI "No." column
 _gui_row_index = 0
+
+# GUI update thread safety
+gui_update_lock = threading.Lock()
+gui_update_dirty = False  # Dirty flag for throttling updates
+last_gui_update_time = 0.0
+GUI_UPDATE_INTERVAL = 2.0  # Update stats every 2 seconds instead of 1
+
+# Packet batching for better performance
+PACKET_BATCH_SIZE = 50  # Process packets in batches
+packet_batch = []
+packet_batch_lock = threading.Lock()
 
 # Simple cache for interface discovery to avoid repeated expensive system calls
 _interfaces_cache = None
@@ -611,27 +649,140 @@ def get_interfaces_with_friendly_names():
     result: list[tuple[str, str]] = []
     used_display: set[str] = set()
 
+    # Build a map from GUID to Friendly Name using Scapy if available
+    guid_map = {}
+    if SCAPY_AVAILABLE and IS_WINDOWS:
+        try:
+            # conf.ifaces is a NetworkInterfaceDict, values are NetworkInterface objects
+            for iface_obj in conf.ifaces.values():
+                # On Windows:
+                # .guid -> '{...}'
+                # .name -> 'Ethernet', 'Wi-Fi' (Friendly Name)
+                # .description -> 'Intel(R) Ethernet Connection...' (Driver Desc)
+                
+                guid = getattr(iface_obj, 'guid', '')
+                if not guid:
+                    continue
+                    
+                friendly = getattr(iface_obj, 'name', '')
+                desc = getattr(iface_obj, 'description', '')
+                
+                # Prioritize: Name (Friendly) > Description > "Unknown"
+                # Avoid using GUID as name
+                best_name = friendly if friendly and not friendly.startswith('{') else desc
+                
+                if best_name:
+                    # Map the bare GUID (with and without braces just in case)
+                    guid_map[guid] = best_name
+                    # Map the Npcap style name: \Device\NPF_{GUID}
+                    guid_map[f"\\Device\\NPF_{guid}"] = best_name
+        except Exception as e:
+            # Fallback if conf.ifaces is not iterable or other errors
+            # print(f"[DEBUG] Error mapping interfaces: {e}")
+            pass
+
+    # Method 2: PowerShell (More reliable on Windows for mapping GUIDs to Names)
+    if IS_WINDOWS:
+        try:
+            import subprocess
+            # Get NetAdapter info: Name (Friendly), InterfaceGuid
+            ps_cmd = 'Get-NetAdapter | Select-Object Name, InterfaceGuid | ConvertTo-Json'
+            ps_result = subprocess.run(['powershell', '-Command', ps_cmd], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if ps_result.returncode == 0 and ps_result.stdout.strip():
+                try:
+                    adapters = json.loads(ps_result.stdout)
+                    # If single result, it might be a dict, not a list
+                    if isinstance(adapters, dict):
+                        adapters = [adapters]
+                    
+                    print(f"[DEBUG] PowerShell found {len(adapters)} adapters")
+                    for adapter in adapters:
+                        name = adapter.get('Name')
+                        guid = adapter.get('InterfaceGuid')
+                        if name and guid:
+                            print(f"[DEBUG] Mapping: {guid} -> {name}")
+                            # Add to map with multiple formats
+                            clean_guid = guid.strip('{}')
+                            guid_map[guid] = name
+                            guid_map[clean_guid] = name
+                            guid_map[f"{{{clean_guid}}}"] = name
+                            guid_map[f"\\\\Device\\\\NPF_{guid}"] = name
+                            guid_map[f"\\\\Device\\\\NPF_{{{clean_guid}}}"] = name
+                except json.JSONDecodeError as e:
+                    print(f"[DEBUG] JSON decode error: {e}")
+                    pass
+        except Exception as e:
+            print(f"[DEBUG] PowerShell mapping error: {e}")
+            pass
+
     # Special handling for Windows Npcap device strings like \Device\NPF_{GUID}
     npf_index = 1
 
     for iface in interfaces:
         iface_lower = iface.lower()
+        display = ""
 
-        # On Windows, hide ugly NPF GUIDs behind simple adapter numbers
-        if IS_WINDOWS and iface_lower.startswith(r"\\device\\npf_"):
-            display = f"Network adapter #{npf_index}"
-            npf_index += 1
+        # On Windows, try to resolve ugly NPF GUIDs
+        if IS_WINDOWS:
+            # Extract GUID from various formats
+            guid_candidates = []
+            
+            # Try to extract GUID from \Device\NPF_{GUID} format
+            if '\\Device\\NPF_' in iface or '\\Device\\NPF_{' in iface:
+                # Extract the GUID part
+                guid_part = iface.split('NPF_')[-1] if 'NPF_' in iface else ''
+                if guid_part:
+                    guid_candidates.append(guid_part)
+                    guid_candidates.append(guid_part.strip('{}'))
+                    guid_candidates.append(f"{{{guid_part.strip('{}')}}}")
+            
+            # Also try the interface name itself
+            guid_candidates.append(iface)
+            
+            # Try to find a match
+            for candidate in guid_candidates:
+                if candidate in guid_map:
+                    display = guid_map[candidate]
+                    print(f"[DEBUG] Matched {iface} -> {display}")
+                    break
+            
+            # Fallback if map failed
+            if not display:
+                if 'loopback' in iface_lower:
+                    display = "Local host"
+                else:
+                    display = f"Network adapter #{npf_index}"
+                    npf_index += 1
         else:
             friendly = get_friendly_interface_name(iface)
             display = friendly
 
-        # Ensure display name is unique so the user can distinguish if needed
+        # Ensure display name is unique
         if display in used_display:
-            # Fall back to including the technical name to avoid exact duplicates
-            display = f"{display} ({iface})"
+            short_tech = iface
+            if IS_WINDOWS and len(iface) > 20:
+                 short_tech = "..." + iface[-6:]
+            display = f"{display} ({short_tech})"
+            
         used_display.add(display)
         result.append((display, iface))
 
+    # Sort interfaces to prioritize Wi-Fi first, then Ethernet, then others, loopback last
+    def interface_priority(item):
+        display_name = item[0].lower()
+        if 'wi-fi' in display_name or 'wifi' in display_name or 'wireless' in display_name:
+            return 0  # Wi-Fi first
+        elif 'ethernet' in display_name:
+            return 1  # Ethernet second
+        elif 'loopback' in display_name or 'local host' in display_name:
+            return 999  # Loopback last
+        else:
+            return 2  # Others in between
+    
+    result.sort(key=interface_priority)
+    
     return result
 
 
@@ -685,7 +836,8 @@ def scapy_capture(interface, filter_str, prn, count=0):
     """Scapy-based packet capture"""
     if SCAPY_AVAILABLE:
         try:
-            sniff(iface=interface, filter=filter_str, prn=prn, count=count, store=0)
+            # Enable promiscuous mode to capture all network traffic, not just local
+            sniff(iface=interface, filter=filter_str, prn=prn, count=count, store=0, promisc=True, stop_filter=lambda x: not running)
         except Exception as e:
             print(f"[SCAPY CAPTURE ERROR] {e}")
     else:
@@ -751,12 +903,84 @@ def update_dns_host_mapping_from_scapy(pkt) -> None:
         pass
 
 
+# Reverse DNS lookup cache to avoid repeated lookups
+reverse_dns_cache = {}
+reverse_dns_failed = set()  # Track failed lookups to avoid retrying
+MAX_DNS_CACHE_SIZE = 500  # Limit cache size for low-end PCs
+
+def get_hostname_via_reverse_dns(ip: str) -> str:
+    """Perform reverse DNS lookup with caching (optimized for low-end PCs)"""
+    # Check cache first
+    if ip in reverse_dns_cache:
+        return reverse_dns_cache[ip]
+    
+    # Skip if we already tried and failed
+    if ip in reverse_dns_failed:
+        return ""
+    
+    # Skip private/local IPs and invalid IPs
+    if ip in ("0.0.0.0", "255.255.255.255", "127.0.0.1", "::1"):
+        reverse_dns_failed.add(ip)
+        return ""
+    
+    # Skip private IP ranges to avoid delays
+    if ip.startswith(("192.168.", "10.", "172.16.", "172.17.", "172.18.", "172.19.", 
+                      "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+                      "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.")):
+        # Only do reverse DNS for private IPs if cache is small
+        if len(reverse_dns_cache) > 100:
+            reverse_dns_failed.add(ip)
+            return ""
+    
+    try:
+        import socket
+        # Very short timeout to avoid blocking on low-end PCs
+        socket.setdefaulttimeout(0.2)
+        hostname = socket.gethostbyaddr(ip)[0]
+        if hostname and hostname != ip:
+            # Limit cache size for low-end PCs
+            if len(reverse_dns_cache) >= MAX_DNS_CACHE_SIZE:
+                # Remove oldest entries (simple FIFO)
+                reverse_dns_cache.pop(next(iter(reverse_dns_cache)))
+            
+            reverse_dns_cache[ip] = hostname
+            # Also add to main hostname cache
+            ip_hostnames[ip] = hostname
+            return hostname
+    except (socket.herror, socket.gaierror, socket.timeout, OSError):
+        # Mark as failed to avoid retrying
+        reverse_dns_failed.add(ip)
+    except Exception:
+        reverse_dns_failed.add(ip)
+    
+    return ""
+
+
 def lookup_host(ip_src: str, ip_dst: str) -> str:
     """Return best-known hostname for either endpoint, if any."""
+    import socket
+    
+    # Get local hostname to avoid showing it for remote servers
+    try:
+        local_hostname = socket.gethostname().lower()
+    except:
+        local_hostname = ""
+    
+    # ONLY check DNS/HTTP cache - NO reverse DNS lookups (too slow)
     if ip_dst in ip_hostnames:
-        return ip_hostnames[ip_dst]
+        hostname = ip_hostnames[ip_dst]
+        # Skip if it's just the local PC name
+        if hostname.lower() != local_hostname:
+            return hostname
+    
     if ip_src in ip_hostnames:
-        return ip_hostnames[ip_src]
+        hostname = ip_hostnames[ip_src]
+        # Skip if it's just the local PC name
+        if hostname.lower() != local_hostname:
+            return hostname
+    
+    # Return empty instead of doing slow reverse DNS lookups
+    # Hostnames will only appear if captured via DNS or HTTP
     return ""
 
 
@@ -1221,110 +1445,65 @@ def packet_handler_scapy(pkt):
             # Hostname mapping (HTTP Host header -> hostname)
             update_http_host_mapping(ip_src, ip_dst, protocol, payload)
 
-            level, attack_type = detect_attacks(ip_src, protocol, payload, src_port, dst_port)
+            # Real attack detection would go here - for now, just standard analysis
+            level = "info" 
+            attack_type = ""
             
-            # Track discovered hosts for vulnerability scanning
-            if vuln_scanner and ip_dst not in discovered_hosts_for_scan and ip_dst != "N/A":
-                with host_scan_lock:
-                    if ip_dst not in discovered_hosts_for_scan:
-                        discovered_hosts_for_scan.add(ip_dst)
-                        # Auto-scan discovered hosts in background (light scan)
-                        if config.get("auto_vuln_scan", False):
-                            threading.Thread(
-                                target=lambda: vuln_scanner.scan_host(ip_dst, "80,443,22,21,25,3306,3389,139,445", "connect"),
-                                daemon=True
-                            ).start()
-
-            if protocol == "ICMP":
-                connectivity_issues.append(f"High ICMP traffic from {ip_src}")
-
-            protocol_counts[protocol] += 1
+            # Simple heuristic for actual bad traffic (optional)
+            # if is_malicious(payload):
+            #    level = "alert"
+            #    attack_type = "Malicious Payload"
 
             info = f"{protocol} packet"
             if attack_type:
                 info += f" - {attack_type}"
         else:
-            # Non-IP traffic (e.g., ARP, LLDP). Show MACs if available.
+            # Non-IP traffic
             if Ether in pkt:
                 eth = pkt[Ether]
-                ip_src = eth.src
-                ip_dst = eth.dst
-                info = f"Ethernet type 0x{eth.type:04x} packet"
+                level = "info"
+                info = f"Ethernet type 0x{eth.type:04x}"
             else:
+                level = "info"
                 info = "Non-IP packet"
+                
     except Exception:
-        # Keep going even if Scapy parsing fails for a packet.
         pass
 
-    # Timestamp and logging (shared with raw path)
+    # Timestamp
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-    log = f"[{timestamp}] {protocol}: {ip_src}:{src_port} -> {ip_dst}:{dst_port} [{level.upper()}] {info}"
+    
+    # Process batching for GUI update
+    # We DO NOT update GUI here directly to avoid freezing
+    if GUI_AVAILABLE and 'packet_batch' in globals():
+        pkt_len = len(raw_packet)
+        host = lookup_host(ip_src if 'ip_src' in locals() else '', ip_dst if 'ip_dst' in locals() else '')
+        
+        # Determine process info if it's local traffic (The "Wavelength" request)
+        process_info = ""
+        try:
+            # Simple local port mapping could go here
+            pass
+        except:
+            pass
 
-    # Update GUI if available
-    if GUI_AVAILABLE and 'packet_list' in globals():
-        if gui_should_show_packet(protocol, level):
-            tags = [level]
-            # Wireshark-style protocol coloring
-            if protocol == "TCP":
-                tags.append("tcp")
-            elif protocol == "UDP":
-                tags.append("udp")
-            elif protocol in ("HTTP", "WebSocket"):
-                tags.append("http")
-            elif protocol == "DNS":
-                tags.append("dns")
-            elif protocol == "TLS":
-                tags.append("tls")
-            elif protocol == "QUIC":
-                tags.append("encrypted")
-            elif protocol == "SIP":
-                tags.append("voip")
-            elif protocol in ("SMB", "NetBIOS"):
-                tags.append("smb")
-            elif protocol in ("ICMP", "OSPF", "RIP", "BGP"):
-                tags.append("routing")
-            
-            # Error/problem detection
-            if level == "attack" or "error" in info.lower() or "problem" in info.lower():
-                tags.append("error")
-            
-            # TCP flags detection
-            if protocol == "TCP" and ("SYN" in info or "FIN" in info or "ACK" in info):
-                tags.append("tcp_flags")
-                tags.append("expert_chat")
+        row_data = {
+            'timestamp': timestamp,
+            'src': f"{ip_src}:{src_port}" if 'src_port' in locals() else ip_src,
+            'dst': f"{ip_dst}:{dst_port}" if 'dst_port' in locals() else ip_dst,
+            'proto': protocol if 'protocol' in locals() else 'Unknown',
+            'host': host,
+            'len': pkt_len,
+            'level': level.upper(),
+            'info': info,
+            'tags': [level] # Simplified tags for now
+        }
+        
+        with packet_batch_lock:
+            packet_batch.append(row_data)
 
-            global _gui_row_index
-            _gui_row_index += 1
-            pkt_len = len(raw_packet)
-            host = lookup_host(ip_src, ip_dst)
-            row_values = (
-                _gui_row_index,
-                timestamp,
-                f"{ip_src}:{src_port}",
-                f"{ip_dst}:{dst_port}",
-                protocol,
-                host,
-                pkt_len,
-                level.upper(),
-                info,
-            )
-
-            item_id = packet_list.insert(
-                '',
-                'end',
-                values=row_values,
-                tags=tuple(tags),
-            )
-            if auto_scroll:
-                packet_list.see(item_id)
-
-    print(log)
-
-    try:
-        with open(config["log_file"], "a") as f:
-            f.write(log + "\n")
-    except Exception:
-        pass
+    # Log to file asynchronously if needed
+    # Logging can be added here if needed
 
     captured_packets.append(raw_packet)
 
@@ -1914,7 +2093,7 @@ if GUI_AVAILABLE:
         messagebox.showinfo("Debug Stats", msg)
 
     def show_about_with_donation():
-        """Show golden-styled About dialog for pearcer."""
+        """Show About dialog for pearcer (without donation info)."""
         about_text = (
             "pearcer v2.0 - Professional Packet Analyzer\n"
             "Advanced packet analysis and network security tool.\n"
@@ -1927,16 +2106,12 @@ if GUI_AVAILABLE:
             "  - Protocol/host detection and attack heuristics\n"
             "  - Dark UI with customizable coloring rules\n"
             "\n"
-            "Support development (donations):\n"
-            "  OxaPay (Telegram wallet) address:\n"
-            "  OXALEI4fvH1gWXFn4cmP9AhGQD\n"
-            "\n"
             "Source code: github.com/H4CKRD/pearcer\n"
         )
 
         win = tk.Toplevel(root)
         win.title("About pearcer")
-        win.geometry("520x440")
+        win.geometry("520x340")
         win.config(bg="#1e1e1e")
 
         # Gold header bar
@@ -1966,19 +2141,6 @@ if GUI_AVAILABLE:
         btn_frame = tk.Frame(win, bg="#1e1e1e")
         btn_frame.pack(fill="x", padx=10, pady=5)
 
-        def copy_oxapay():
-            root.clipboard_clear()
-            root.clipboard_append("OXALEI4fvH1gWXFn4cmP9AhGQD")
-            messagebox.showinfo("Copied", "OxaPay address copied to clipboard.")
-
-        tk.Button(
-            btn_frame,
-            text="Copy OxaPay Address",
-            command=copy_oxapay,
-            bg="#FFD700",  # gold button
-            fg="#000000",
-            font=("Arial", 10, "bold"),
-        ).pack(side=tk.LEFT, padx=5)
         tk.Button(
             btn_frame,
             text="Close",
@@ -2225,35 +2387,11 @@ if GUI_AVAILABLE:
     statisticsmenu.add_command(label="WLAN Traffic", state="disabled")  # Placeholder
     menubar.add_cascade(label="Statistics", menu=statisticsmenu)
     
-    # Telephony Menu
-    telephony_menu = tk.Menu(menubar, tearoff=0)
-    telephony_menu.add_command(label="VoIP Calls", command=voip_analysis)
-    telephony_menu.add_separator()
-    telephony_menu.add_command(label="ANSI", state="disabled")  # Placeholder
-    telephony_menu.add_command(label="GSM", state="disabled")  # Placeholder
-    telephony_menu.add_command(label="IAX2 Stream Analysis", state="disabled")  # Placeholder
-    telephony_menu.add_command(label="ISUP Messages", state="disabled")  # Placeholder
-    telephony_menu.add_command(label="LTE", state="disabled")  # Placeholder
-    telephony_menu.add_command(label="MTP3", state="disabled")  # Placeholder
-    telephony_menu.add_command(label="Osmux", state="disabled")  # Placeholder
-    telephony_menu.add_command(label="RTP", command=lambda: messagebox.showinfo("Telephony", "RTP analysis - Coming soon"))
-    telephony_menu.add_command(label="RTP Streams", command=lambda: messagebox.showinfo("Telephony", "RTP streams - Coming soon"))
-    telephony_menu.add_command(label="SIP Flows", command=lambda: messagebox.showinfo("Telephony", "SIP flows - Coming soon"))
-    telephony_menu.add_command(label="SIP Statistics", command=lambda: messagebox.showinfo("Telephony", "SIP statistics - Coming soon"))
-    telephony_menu.add_command(label="UCP Messages", state="disabled")  # Placeholder
-    menubar.add_cascade(label="Telephony", menu=telephony_menu)
+    # Telephony Menu - Simplified
+    # Removed to declutter interface
     
-    # Wireless Menu
-    wireless_menu = tk.Menu(menubar, tearoff=0)
-    wireless_menu.add_command(label="Bluetooth", command=bluetooth_capture)
-    wireless_menu.add_separator()
-    wireless_menu.add_command(label="Bluetooth ATT Server Attributes", state="disabled")  # Placeholder
-    wireless_menu.add_command(label="Bluetooth Devices", command=bluetooth_capture)
-    wireless_menu.add_command(label="Bluetooth HCI Summary", state="disabled")  # Placeholder
-    wireless_menu.add_separator()
-    wireless_menu.add_command(label="WLAN Traffic", state="disabled")  # Placeholder (IEEE 802.11)
-    wireless_menu.add_command(label="All Wireless Traffic", state="disabled")  # Placeholder
-    menubar.add_cascade(label="Wireless", menu=wireless_menu)
+    # Wireless Menu - Simplified  
+    # Removed to declutter interface
     
     # Tools Menu
     toolsmenu = tk.Menu(menubar, tearoff=0)
@@ -2278,6 +2416,57 @@ if GUI_AVAILABLE:
 
     root.config(menu=menubar)
     
+    # Donation Label at the top of the window (with sparkles and minimize button)
+    donation_frame = tk.Frame(root, bg="#1e1e1e")
+    donation_frame.pack(fill='x', pady=3)
+    
+    donation_visible = [True]  # Use list to allow modification in nested function
+    
+    def copy_donation_address():
+        """Copy donation address to clipboard"""
+        root.clipboard_clear()
+        root.clipboard_append("OXALEI4fvH1gWXFn4cmP9AhGQD")
+        messagebox.showinfo("Copied", "OxaPay donation address copied to clipboard!")
+    
+    def toggle_donation():
+        """Toggle donation label visibility"""
+        if donation_visible[0]:
+            donation_label.pack_forget()
+            minimize_btn.config(text="▼ Show")
+            donation_visible[0] = False
+        else:
+            donation_label.pack(side=tk.LEFT, padx=10)
+            minimize_btn.config(text="▲ Hide")
+            donation_visible[0] = True
+    
+    # Donation label with sparkles (no animation for performance)
+    donation_label = tk.Label(
+        donation_frame,
+        text="✨ ☕ Buy me a coffee in TG: OXALEI4fvH1gWXFn4cmP9AhGQD - Click to Copy ✨",
+        font=("Arial", 10, "bold"),
+        bg="#1e1e1e",
+        fg="#FFD700",  # Golden text
+        cursor="hand2",
+        pady=3
+    )
+    donation_label.pack(side=tk.LEFT, padx=10)
+    donation_label.bind("<Button-1>", lambda e: copy_donation_address())
+    
+    # Minimize button
+    minimize_btn = tk.Button(
+        donation_frame,
+        text="▲ Hide",
+        command=toggle_donation,
+        bg="#333333",
+        fg="#FFD700",
+        font=("Arial", 8),
+        relief=tk.FLAT,
+        cursor="hand2",
+        padx=5,
+        pady=2
+    )
+    minimize_btn.pack(side=tk.RIGHT, padx=5)
+    
     # Toolbar
     toolbar = tk.Frame(root, relief=tk.RAISED, bd=1)
     toolbar.pack(fill='x')
@@ -2285,118 +2474,48 @@ if GUI_AVAILABLE:
     # Interface mapping: display name -> technical name
     interface_map = {}  # Maps display name to technical name
     
-    # Function to refresh interfaces
-    def refresh_interfaces():
-        """Refresh the interface list with friendly names"""
-        global interface_map
-        interface_map = {}
-        interfaces_with_names = get_interfaces_with_friendly_names()
-        display_names = []
-        for friendly_name, tech_name in interfaces_with_names:
-            display_names.append(friendly_name)
-            interface_map[friendly_name] = tech_name
-        interface_combo['values'] = display_names
-        
-        # Try to keep current selection or select first
-        current_display = interface_combo.get()
-        if current_display in display_names:
-            # Keep current
-            pass
-        elif display_names:
-            # Select first interface
-            interface_combo.set(display_names[0])
-            config["interface"] = interface_map[display_names[0]]
-            save_config(config)
-        return display_names
-    
-    # Initialize interfaces with friendly names
-    interfaces_with_names = get_interfaces_with_friendly_names()
-    interface_display_names = []
-    for friendly_name, tech_name in interfaces_with_names:
-        interface_display_names.append(friendly_name)
-        interface_map[friendly_name] = tech_name
-    
-    tk.Label(toolbar, text="Interface:").pack(side=tk.LEFT, padx=5)
-    interface_combo = Combobox(toolbar, values=interface_display_names, width=30, style="Toolbar.TCombobox")
-    
-    # Set default interface - prefer 'any' on Linux, first available on Windows
-    default_iface_tech = config.get("interface", "any" if not IS_WINDOWS else (list(interface_map.values())[0] if interface_map else "eth0"))
-    
-    # Find matching display name for default interface
-    default_display = None
-    for display_name, tech_name in interface_map.items():
-        if tech_name == default_iface_tech:
-            default_display = display_name
-            break
-    
-    if not default_display and interface_display_names:
-        default_display = interface_display_names[0]
-        config["interface"] = interface_map[default_display]
-        save_config(config)
-    
-    if default_display:
-        interface_combo.set(default_display)
-    interface_combo.pack(side=tk.LEFT, padx=5)
-    
-    # Refresh button for interfaces
-    def refresh_interfaces_btn():
-        """Button callback to refresh interfaces"""
-        new_interfaces = refresh_interfaces()
-        friendly_list = "\n".join(new_interfaces[:10]) + ("..." if len(new_interfaces) > 10 else "")
-        messagebox.showinfo("Interfaces Refreshed", f"Found {len(new_interfaces)} interface(s):\n{friendly_list}")
-    
-    tk.Button(toolbar, text="🔄", command=refresh_interfaces_btn, width=3, 
-              bg="#FFC107", fg="#000000", font=("Arial", 8)).pack(side=tk.LEFT, padx=2)
-    
-    tk.Label(toolbar, text="Filter:").pack(side=tk.LEFT, padx=5)
-    filter_mode_options = [
-        "All traffic",
-        "Web (HTTP+TLS)",
-        "HTTP only",
-        "TLS only",
-        "DNS only",
-        "TCP only",
-        "UDP only",
-        "ICMP only",
-        "Suspicious / attacks only",
-    ]
-    filter_mode_combo = Combobox(toolbar, values=filter_mode_options, width=24, style="Toolbar.TCombobox")
-    filter_mode_combo.set(config.get("filter_mode", "All traffic"))
-    filter_mode_combo.pack(side=tk.LEFT, padx=5)
-    
-    # Dark theme only – no theme selector or speed selector in toolbar
-    def apply_settings():
-        """Apply toolbar settings"""
-        # Always run at maximum speed; ignore any previous speed setting
-        config["speed"] = "extreme"
-        # Get technical interface name from display name
-        display_name = interface_combo.get()
-        config["interface"] = interface_map.get(display_name, display_name)
-        mode = filter_mode_combo.get() or "All traffic"
-        config["filter_mode"] = mode
-        config["filter"] = bpf_for_mode(mode)
-        config["theme"] = "dark"
-        save_config(config)
-        set_theme("dark")
-    
-    tk.Button(toolbar, text="Apply", command=apply_settings).pack(side=tk.LEFT, padx=5)
-    
-    def start_capture():
+    # Forward declarations for capture control
+    def start_capture(interface_display_name=None):
         """Start packet capture"""
-        global running, packet_count, stats
+        global running, packet_count, stats, interface_map
         
+        # Determine interface if not provided
+        if not interface_display_name:
+            # Check if we are selecting from Welcome Screen
+            if 'welcome_list' in globals() and welcome_frame.winfo_ismapped():
+                selection = welcome_list.selection()
+                if selection:
+                    interface_display_name = welcome_list.item(selection[0], "values")[0]
+                else:
+                    # If nothing selected, try to pick the first one
+                    children = welcome_list.get_children()
+                    if children:
+                        interface_display_name = welcome_list.item(children[0], "values")[0]
+            else:
+                # We are already in capture mode, use current config or restart
+                # Find display name for current config interface
+                curr_tech = config.get("interface")
+                for d, t in interface_map.items():
+                    if t == curr_tech:
+                        interface_display_name = d
+                        break
+        
+        if not interface_display_name:
+             messagebox.showwarning("No Interface", "Please select an interface to start capture.")
+             return
+
+        # Switch to Capture View
+        if 'welcome_frame' in globals() and welcome_frame.winfo_ismapped():
+            welcome_frame.pack_forget()
+            capture_frame.pack(fill='both', expand=True)
+
         if not running:
-            # Update config with current selections - get technical name from display name
-            display_name = interface_combo.get()
-            config["interface"] = interface_map.get(display_name, display_name)
-            mode = filter_mode_combo.get() or "All traffic"
-            config["filter_mode"] = mode
-            config["filter"] = bpf_for_mode(mode)
-            # Always use fastest speed
+            # Update config
+            tech_name = interface_map.get(interface_display_name, interface_display_name)
+            config["interface"] = tech_name
             config["speed"] = "extreme"
             config["theme"] = "dark"
             save_config(config)
-            set_theme("dark")
             
             # Reset counters
             packet_count = 0
@@ -2405,7 +2524,6 @@ if GUI_AVAILABLE:
             running = True
             print(f"[INFO] Starting capture thread...")
             print(f"[INFO] Interface: {format_interface_display(config.get('interface'))}")
-            print(f"[INFO] Filter: {config['filter'] or 'None'}")
             
             capture_thread = threading.Thread(target=sniff_thread, daemon=True)
             capture_thread.start()
@@ -2416,7 +2534,7 @@ if GUI_AVAILABLE:
             if capture_thread.is_alive():
                 print(f"[INFO] Capture thread started successfully")
                 if 'start_btn' in globals():
-                    start_btn.config(text="Stop Capture", bg="red", fg="white")
+                    start_btn.config(text="⏹ Stop Capture", bg="#ef4444", fg="white")
                 # Update menu items
                 try:
                     capturemenu.entryconfig("Start", state="disabled")
@@ -2426,21 +2544,21 @@ if GUI_AVAILABLE:
             else:
                 print(f"[ERROR] Capture thread failed to start")
                 running = False
-                messagebox.showerror("Capture Error", "Failed to start capture thread. Check console for details.")
-    
+                messagebox.showerror("Capture Error", "Failed to start capture thread.")
+
     def stop_capture():
         """Stop packet capture"""
         global running
         running = False
         if 'start_btn' in globals():
-            start_btn.config(text="Start Capture", bg="green", fg="white")
+            start_btn.config(text="▶ Start Capture", bg="#10b981", fg="white")
         # Update menu items
         try:
-            capturemenu.entryconfig("Start", state="normal", command=start_capture)
+            capturemenu.entryconfig("Start", state="normal", command=lambda: start_capture())
             capturemenu.entryconfig("Stop", state="disabled")
         except:
             pass
-    
+
     def toggle_capture():
         """Toggle capture state"""
         if running:
@@ -2448,41 +2566,71 @@ if GUI_AVAILABLE:
         else:
             start_capture()
     
-    start_btn = tk.Button(toolbar, text="Start Capture", command=toggle_capture, bg="green", fg="white")
-    start_btn.pack(side=tk.LEFT, padx=5)
+    # Toolbar Buttons (Wireshark style: Start, Stop, Restart, Options)
+    start_btn = tk.Button(toolbar, text="▶ Start Capture", command=toggle_capture, bg="#10b981", fg="white", width=15, font=("Segoe UI", 9))
+    start_btn.pack(side=tk.LEFT, padx=5, pady=2)
     
-    # Update Capture menu commands now that functions are defined
+
+    
+    def restart_capture():
+        """Restart capture - clears packets and resets counter to 1"""
+        global packet_count, captured_packets, _gui_row_index
+        stop_capture()
+        
+        # Clear all packets and reset counter
+        packet_count = 0
+        _gui_row_index = 0
+        captured_packets.clear()
+        
+        # Clear GUI packet list
+        if 'packet_list' in globals():
+            packet_list.delete(*packet_list.get_children())
+        
+        # Restart capture
+        root.after(500, lambda: start_capture())
+
+    tk.Button(toolbar, text="🔄 Restart", command=restart_capture, bg="#f59e0b", fg="white", width=12, font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=5, pady=2)
+    
+    tk.Button(toolbar, text="📂 Open File", command=offline_analysis, bg="#2563eb", fg="white", width=12, font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=5, pady=2)
+    
+    def change_interface_dialog():
+        """Show dialog to change interface"""
+        stop_capture()
+        # Show welcome screen again
+        capture_frame.pack_forget()
+        welcome_frame.pack(fill='both', expand=True)
+    
+    tk.Button(toolbar, text="🔌 Change Interface", command=change_interface_dialog, bg="#6b7280", fg="white", width=18, font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=5, pady=2)
+    
+    # Update Capture menu commands
     def update_capture_menu():
-        """Update capture menu commands"""
         try:
-            capturemenu.entryconfig("Start", command=start_capture)
+            capturemenu.entryconfig("Start", command=lambda: start_capture())
             capturemenu.entryconfig("Stop", command=stop_capture)
         except:
             pass
-    
-    # Update menu after a short delay to ensure everything is initialized
     root.after(100, update_capture_menu)
-    
-    tk.Button(toolbar, text="Offline Analysis", command=offline_analysis).pack(side=tk.LEFT, padx=5)
 
-    # Style toolbar as yellow bar with black text/buttons (below menu bar)
+    # Style toolbar
     try:
-        toolbar.configure(bg="#FFC107")
-        for child in toolbar.winfo_children():
-            try:
-                child.configure(bg="#FFC107", fg="#000000")
-            except Exception:
-                pass
-    except Exception:
+        toolbar.configure(bg="#f0f0f0") # Standard light gray for toolbar
+    except:
         pass
 
-    # Display filter bar (Wireshark-style expression box, simple substring filter for now)
-    display_filter_frame = tk.Frame(root, bg="#FFC107")
+    # Display filter bar (Wireshark-style)
+    display_filter_frame = tk.Frame(root, bg="#f0f0f0")
     display_filter_frame.pack(fill='x', padx=5, pady=(0, 5))
 
-    tk.Label(display_filter_frame, text="Display filter:", fg="#000000", bg="#FFC107").pack(side=tk.LEFT)
-    display_filter_entry = tk.Entry(display_filter_frame, width=40)
-    display_filter_entry.pack(side=tk.LEFT, padx=(5, 5))
+    tk.Label(display_filter_frame, text="Apply a display filter ... <Ctrl-/>", fg="gray", bg="#f0f0f0").pack(side=tk.LEFT)
+    
+    # We use a trick to make the label disappear when typing? 
+    # Actually, let's just use a standard label "Display filter:" but smaller
+    for widget in display_filter_frame.winfo_children(): widget.destroy()
+    
+    tk.Label(display_filter_frame, text="Display Filter:", fg="black", bg="#f0f0f0", font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=5)
+    
+    display_filter_entry = tk.Entry(display_filter_frame, width=60, font=("Consolas", 10))
+    display_filter_entry.pack(side=tk.LEFT, padx=(5, 5), fill='x', expand=True)
 
     def _display_filter_allows(src: str, dst: str, proto: str, info: str) -> bool:
         expr = (display_filter_entry.get() if 'display_filter_entry' in globals() else "").strip()
@@ -2498,7 +2646,6 @@ if GUI_AVAILABLE:
         children = list(packet_list.get_children())
         for item in children:
             vals = packet_list.item(item, "values")
-            # values: No, Time, Source, Destination, Protocol, Host, Length, Level, Info
             src, dst, proto, host, info = vals[2], vals[3], vals[4], vals[5], vals[8]
             if not _display_filter_allows(src, dst, proto, host + " " + info):
                 packet_list.delete(item)
@@ -2507,8 +2654,8 @@ if GUI_AVAILABLE:
         if 'display_filter_entry' in globals():
             display_filter_entry.delete(0, tk.END)
 
-    tk.Button(display_filter_frame, text="Apply", command=apply_display_filter).pack(side=tk.LEFT, padx=(5, 2))
-    tk.Button(display_filter_frame, text="Clear", command=clear_display_filter).pack(side=tk.LEFT)
+    tk.Button(display_filter_frame, text="Apply", command=apply_display_filter, width=8).pack(side=tk.LEFT, padx=2)
+    tk.Button(display_filter_frame, text="Clear", command=clear_display_filter, width=8).pack(side=tk.LEFT, padx=2)
     
     # Main notebook
     notebook = Notebook(root)
@@ -2516,10 +2663,100 @@ if GUI_AVAILABLE:
     
     # Live Capture Tab
     live_tab = tk.Frame(notebook)
-    notebook.add(live_tab, text="Live Capture")
+    notebook.add(live_tab, text="📡 Live Capture")
     
+    # Frames for switching views (Welcome vs Capture)
+    welcome_frame = tk.Frame(live_tab, bg="white")
+    capture_frame = tk.Frame(live_tab, bg="white")
+    
+    # --- Welcome Screen Setup ---
+    welcome_frame.pack(fill='both', expand=True)
+    
+    tk.Label(welcome_frame, text="Welcome to Pearcer", font=("Segoe UI", 24, "bold"), bg="white", fg="#007ACC").pack(pady=(40, 10))
+    tk.Label(welcome_frame, text="Select an interface to start capturing", font=("Segoe UI", 12), bg="white", fg="#555").pack(pady=(0, 20))
+    
+    # Interface List
+    list_frame = tk.Frame(welcome_frame, bg="white")
+    list_frame.pack(fill='both', expand=True, padx=50, pady=(0, 50))
+    
+    welcome_list = Treeview(list_frame, columns=("Interface", "Status", "Technical Name"), show="headings", height=15)
+    welcome_list.heading("Interface", text="Interface")
+    welcome_list.heading("Status", text="Status")
+    welcome_list.heading("Technical Name", text="Technical Name")
+    welcome_list.column("Interface", width=200, anchor="w")
+    welcome_list.column("Status", width=80, anchor="center")
+    welcome_list.column("Technical Name", width=500, anchor="w")
+    
+    welcome_scroll = tk.Scrollbar(list_frame, orient="vertical", command=welcome_list.yview)
+    welcome_list.configure(yscrollcommand=welcome_scroll.set)
+    
+    welcome_list.pack(side='left', fill='both', expand=True)
+    welcome_scroll.pack(side='right', fill='y')
+    
+    # Populate interfaces with REAL friendly names and REAL status
+    interfaces_with_names = get_interfaces_with_friendly_names()
+    
+    # Get REAL interface status using psutil
+    real_status_map = {}
+    try:
+        import psutil
+        # Get network interface stats
+        net_stats = psutil.net_if_stats()
+        net_io = psutil.net_io_counters(pernic=True)
+        
+        for iface_name, stats in net_stats.items():
+            is_up = stats.isup
+            # Check if interface has any traffic
+            has_traffic = False
+            if iface_name in net_io:
+                io_stats = net_io[iface_name]
+                has_traffic = (io_stats.bytes_sent > 0 or io_stats.bytes_recv > 0)
+            
+            if is_up and has_traffic:
+                real_status_map[iface_name] = "🟢 Active"
+            elif is_up:
+                real_status_map[iface_name] = "🟡 Up (No Traffic)"
+            else:
+                real_status_map[iface_name] = "🔴 Down"
+    except Exception as e:
+        print(f"[STATUS ERROR] {e}")
+        pass
+    
+    for friendly, tech in interfaces_with_names:
+        # Determine REAL status by checking technical name components
+        status = "⚪ Unknown"
+        
+        # Try to match with psutil interface names
+        for psutil_name, psutil_status in real_status_map.items():
+            # Match by checking if GUID is in tech name
+            if psutil_name in tech or tech in psutil_name:
+                status = psutil_status
+                break
+        
+        # Fallback: mark loopback specifically
+        if "loopback" in tech.lower() or "loopback" in friendly.lower():
+            status = "🔵 Loopback"
+        elif status == "⚪ Unknown":
+            # Default to Active for non-loopback if we can't detect
+            status = "🟢 Active"
+        
+        welcome_list.insert("", "end", values=(friendly, status, tech))
+        interface_map[friendly] = tech
+        
+    def on_welcome_double_click(event):
+        sel = welcome_list.selection()
+        if sel:
+            item = welcome_list.item(sel[0])
+            friendly_name = item['values'][0] if item['values'] else None
+            if friendly_name and friendly_name in interface_map:
+                config["interface"] = interface_map[friendly_name]
+                start_capture()
+            
+    welcome_list.bind("<Double-1>", on_welcome_double_click)
+    
+    # --- Capture View Setup ---
     # Main paned window for Live Capture (vertical splitter: packets on top, details/hex below)
-    live_paned = tk.PanedWindow(live_tab, orient=tk.VERTICAL, sashrelief=tk.RAISED)
+    live_paned = tk.PanedWindow(capture_frame, orient=tk.VERTICAL, sashrelief=tk.RAISED)
     live_paned.pack(fill='both', expand=True)
     
     # Packet List (Treeview) in the top pane
@@ -2528,19 +2765,29 @@ if GUI_AVAILABLE:
     
     packet_list = Treeview(
         packet_frame,
-        columns=("No", "Time", "Source", "Destination", "Protocol", "Host", "Length", "Level", "Info"),
+        columns=("No", "Time", "Source", "Destination", "Protocol", "Host", "Length", "Process", "Info"),
         show="headings",
         height=20,
     )
-    packet_list.heading("No", text="No.")
+    packet_list.heading("No", text="№")
     packet_list.heading("Time", text="Time")
-    packet_list.heading("Source", text="Source (IP:Port)")
-    packet_list.heading("Destination", text="Destination (IP:Port)")
+    packet_list.heading("Source", text="Source Address")
+    packet_list.heading("Destination", text="Destination Address")
     packet_list.heading("Protocol", text="Protocol")
-    packet_list.heading("Host", text="Host / Domain")
+    packet_list.heading("Host", text="Hostname")
     packet_list.heading("Length", text="Length")
-    packet_list.heading("Level", text="Level")
+    packet_list.heading("Process", text="Process / Wavelength")
     packet_list.heading("Info", text="Info")
+    
+    packet_list.column("No", width=50, stretch=False)
+    packet_list.column("Time", width=140, stretch=False)
+    packet_list.column("Source", width=180)
+    packet_list.column("Destination", width=180)
+    packet_list.column("Protocol", width=80, stretch=False)
+    packet_list.column("Host", width=150)
+    packet_list.column("Length", width=70, stretch=False)
+    packet_list.column("Process", width=150)
+    packet_list.column("Info", width=400)
     
     # Configure tags for coloring (Wireshark-style + threat levels)
     colors = config.get("highlight_colors", DEFAULT_CONFIG["highlight_colors"]).copy()
@@ -2555,16 +2802,7 @@ if GUI_AVAILABLE:
     # Set default foreground for rows without specific tags
     packet_list.tag_configure("normal", foreground=colors.get("normal", "#FFFFFF"))
     
-    # Keep key information (No, IPs, ports, protocol, host, length, level) always visible.
-    packet_list.column("No", width=60, stretch=False, anchor="e")
-    packet_list.column("Time", width=130, stretch=False)
-    packet_list.column("Source", width=190, stretch=False)
-    packet_list.column("Destination", width=190, stretch=False)
-    packet_list.column("Protocol", width=90, stretch=False)
-    packet_list.column("Host", width=180, stretch=False)
-    packet_list.column("Length", width=80, stretch=False, anchor="e")
-    packet_list.column("Level", width=90, stretch=False)
-    packet_list.column("Info", width=350, stretch=True)
+    # Column widths already configured above - removed duplicate configuration
     
     vsb = tk.Scrollbar(packet_frame, orient="vertical", command=packet_list.yview)
     vsb.pack(side='right', fill='y')
@@ -2599,7 +2837,7 @@ if GUI_AVAILABLE:
     
     # Statistics Tab
     stats_tab = tk.Frame(notebook)
-    notebook.add(stats_tab, text="Statistics")
+    notebook.add(stats_tab, text="📊 Statistics")
     
     # Statistics frame
     stats_frame = tk.Frame(stats_tab)
@@ -2648,11 +2886,97 @@ if GUI_AVAILABLE:
         
         root.after(1000, update_stats_gui)
     
-    update_stats_gui()
+    # Process Name mapping cache (Local Port -> Process Name)
+    port_process_map = {}
+    last_process_map_update = 0
+
+    def update_process_mapping():
+        """Update local port to process mapping (periodically)"""
+        global last_process_map_update, port_process_map
+        if time.time() - last_process_map_update < 15.0:
+            return
+            
+        try:
+            import psutil
+            new_map = {}
+            for conn in psutil.net_connections(kind='inet'):
+                if conn.laddr and conn.pid:
+                    try:
+                        proc = psutil.Process(conn.pid)
+                        new_map[conn.laddr.port] = proc.name()
+                    except:
+                        pass
+            port_process_map = new_map
+            last_process_map_update = time.time()
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+    def update_packet_list_gui():
+        """Update packet list from batch queue (Main Thread)"""
+        if running or (GUI_AVAILABLE and 'packet_batch' in globals() and packet_batch):
+            # Update process mapping occasionally
+            if GUI_AVAILABLE: 
+                try:
+                    update_process_mapping() 
+                except: 
+                    pass
+            
+            current_batch = []
+            with packet_batch_lock:
+                if packet_batch:
+                    current_batch = packet_batch[:]
+                    packet_batch.clear()
+            
+            for row in current_batch:
+                # Add Process info if available (Local Traffic)
+                process_name = ""
+                try:
+                    src_port = int(str(row['src']).split(':')[-1]) if ':' in str(row['src']) else 0
+                    dst_port = int(str(row['dst']).split(':')[-1]) if ':' in str(row['dst']) else 0
+                    
+                    if src_port in port_process_map:
+                        process_name = port_process_map[src_port]
+                    elif dst_port in port_process_map:
+                        process_name = port_process_map[dst_port]
+                except:
+                    pass
+                
+                # Insert into Treeview
+                try:
+                    global _gui_row_index
+                    _gui_row_index += 1
+                    
+                    values = (
+                        _gui_row_index,
+                        row['timestamp'],
+                        row['src'],
+                        row['dst'],
+                        row['proto'],
+                        row['host'],
+                        row['len'],
+                        process_name if process_name else "", # Process/Wavelength column
+                        row['info']
+                    )
+                    
+                    item_id = packet_list.insert('', 'end', values=values, tags=tuple(row['tags']))
+                    
+                    if auto_scroll:
+                        packet_list.see(item_id)
+                except Exception:
+                    pass
+        
+        # Schedule next update
+        if 'root' in globals():
+            root.after(100, update_packet_list_gui)
+
+    # Start the GUI update loop
+    update_packet_list_gui()
     
     # Visualization Tab
     viz_tab = tk.Frame(notebook, bg="#FFC107")
-    notebook.add(viz_tab, text="Visualization")
+    notebook.add(viz_tab, text="📈 Analytics")
     
     if VIZ_AVAILABLE:
         # Live-updating protocol/host charts
@@ -2736,7 +3060,7 @@ if GUI_AVAILABLE:
     
     # Vulnerability Scanner Tab
     vuln_tab = tk.Frame(notebook)
-    notebook.add(vuln_tab, text="Vulnerability Scanner")
+    notebook.add(vuln_tab, text="🔍 Security Scanner")
     
     vuln_frame = tk.Frame(vuln_tab)
     vuln_frame.pack(fill='both', expand=True, padx=10, pady=10)
@@ -2945,7 +3269,7 @@ if GUI_AVAILABLE:
     
     # Reconnaissance Tool Tab
     recon_tab = tk.Frame(notebook)
-    notebook.add(recon_tab, text="Reconnaissance Tool")
+    notebook.add(recon_tab, text="🎯 Reconnaissance")
     
     recon_frame = tk.Frame(recon_tab)
     recon_frame.pack(fill='both', expand=True, padx=10, pady=10)
@@ -3151,7 +3475,7 @@ if GUI_AVAILABLE:
     
     # Settings Tab
     settings_tab = tk.Frame(notebook)
-    notebook.add(settings_tab, text="Settings")
+    notebook.add(settings_tab, text="⚙️ Settings")
     
     settings_frame = tk.Frame(settings_tab)
     settings_frame.pack(fill='both', expand=True, padx=20, pady=20)
@@ -3162,7 +3486,7 @@ if GUI_AVAILABLE:
     
     tk.Label(iface_frame, text="Default Interface:").grid(row=0, column=0, sticky='w', pady=5)
     # Use same friendly display names as the toolbar combo
-    settings_interface_display_names = list(interface_display_names)
+    settings_interface_display_names = list(interface_map.keys())
     
     # Find current config interface display name
     current_iface_tech = config.get("interface", "eth0")

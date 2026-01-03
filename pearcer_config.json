@@ -1,5 +1,5 @@
 {
-    "interface": "\\Device\\NPF_Loopback",
+    "interface": "\\Device\\NPF_{3AC70607-0EA1-498F-9E50-C9BBC09531D1}",
     "filter": "",
     "blacklist_ips": [
         "8.8.8.8"
