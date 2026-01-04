@@ -1,44 +1,85 @@
-# pearcer
+# Pearcer - Professional Packet Analyzer
 
-Pearcer is a high-performance, cross-platform network packet analysis tool inspired by Wireshark but focused on extreme speed and modern workflows.
+Pearcer is a **free and open-source (GPLv3)** professional network packet analysis tool. It combines the deep visibility of Wireshark with modern, real-time cyber threat detection and active pentesting capabilities.
 
-## Goals
-- Capture and analyze network packets faster than Wireshark on typical workloads.
-- Provide a professional, customizable GUI comparable to Wireshark.
-- Support both live capture and offline analysis across multiple interfaces (Ethernet, Wi‑Fi, Bluetooth, USB CDC, etc.).
-- Enable deep security analysis: detect malicious activity, identify vulnerabilities, and analyze potential exploits.
+**License**: GNU General Public License v3.0
+**Author**: Jackson Pearce
 
-## Core Features (Planned)
-- **Live Capture & Offline Analysis**
-  - Real-time capture from multiple interfaces.
-  - Load and analyze saved capture files.
-- **Protocol Support**
-  - Common protocols: TCP, UDP, DCCP, TLS, HTTP, HTTP/2, QUIC, WebSocket, SIP, USB CDC, and more.
-- **Powerful Filtering**
-  - Advanced filter syntax for IPs, ports, protocols, payload patterns, and security indicators.
-  - Quick filters for common tasks (e.g., show only HTTP, show only errors).
-- **Attack & Anomaly Detection**
-  - Heuristics and rule-based detection for suspicious flows.
-  - Highlighting and tagging of potential attacks or misconfigurations.
-- **GUI & UX**
-  - Professional multi-pane layout (packet list, details, hex view, statistics).
-  - Coloring rules, customizable themes, and layout presets.
-  - Customizable logos/widgets (e.g., weather, calculator) for dashboard-style views.
-- **Security & Diagnostics Use Cases**
-  - Capturing unencrypted data (passwords, logins) during authorized security reviews.
-  - Diagnosing network connectivity and performance problems.
 
-## Tech Stack (Initial Plan)
-- **Language:** Python (for rapid development and rich ecosystem).
-- **Packet capture backend:** libraries such as `scapy`, `pyshark`, or a thin wrapper over `libpcap`/`Npcap`.
-- **GUI:** Qt-based toolkit (e.g., PySide6/PyQt6) for a native-feeling, cross-platform desktop UI.
+## 🚀 Key Features
 
-## Project Layout
-- `src/pearcer/`
-  - `capture/` – live capture and offline parsing.
-  - `analysis/` – filtering, statistics, and detection logic.
-  - `gui/` – main application windows, views, themes, and widgets.
-  - `protocols/` – protocol-specific helpers and decoders.
-- `tests/` – automated tests.
+### 📡 Live Packet Capture
+- **Multi-interface support**: Capture from Ethernet, Wi-Fi, Loopback, and more.
+- **Android Support**: Capture traffic directly from connected Android devices via ADB (`tcpdump`).
+- **Promiscuous Mode**: Capture all traffic on the wire.
+- **Real-time Parsing**: Instant protocol decoding (TCP, UDP, HTTP, DNS, TLS, QUIC, etc.).
+- **Deep Packet Inspection**: Full recursive dissection of every protocol layer (Ethernet -> IP -> TCP -> Payload), viewable in a detailed tree structure.
 
-This is an early scaffold; functionality will be added iteratively, starting with basic live capture and a minimal GUI, then expanding toward the full feature set described above.
+### 🛡️ Advanced Security Analysis
+- **Threat Detection**: Automatically identifies:
+  - 🔴 **Real Attacks**: SQL Injection, XSS, C2 Beaconing, Malware, Spoofing (ARP/DNS).
+  - 🟠 **Suspicious Activity**: High traffic volume, weak TLS, large outbound transfers, plain Base64.
+- **Strict Coloring**: 
+    - **Red**: Reserved for critical, confirmed attacks/exploits.
+    - **Orange**: Suspicious anomalies requiring investigation.
+- **Vulnerability Scanner**: Integrated NVD CVE lookup and rudimentary port scanner.
+
+### 🛠️ Utilities
+- **Decoder Tool**: Built-in tab for Base64, URL, Hex, HTML, and Binary encoding/decoding.
+- **Process Mapping**: Correlates local traffic to running processes (`chrome.exe`, `python`, etc.).
+
+### ⚔️ Active Attack Suite
+Turn Pearcer from a passive analyzer into an active pentesting tool:
+- **Packet Replayer**: Right-click any packet -> "Edit & Resend". Modify IP, Ports, and Payload on the fly.
+- **WiFi Monitor & Deauth**: 
+    - **Monitor Mode**: Toggle monitor mode (Cross-platform: `WlanHelper` on Windows, native `iwconfig` on Linux).
+    - **Deauth Flood**: Flood dissociation frames to kick users offline.
+- **Professional UI**: 
+    - Wireshark-like 3-pane layout (List, Details, Hex).
+    - Simplified columns (merged Host/Dest).
+    - Dark Mode.
+
+## 📦 Requirements
+- Windows (Primary support) or Linux (Root required)
+- Python 3.8+
+- [Npcap](https://npcap.com/) (Required for Windows sniffing)
+- ADB (for Android capture)
+
+## 🔧 Installation
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/H4CKRD/pearcer.git
+   cd pearcer
+   ```
+
+2. **Create a virtual environment (optional)**:
+   ```bash
+   python -m venv .venv
+   # Windows:
+   .venv\Scripts\Activate.ps1
+   # Linux/Mac:
+   source .venv/bin/activate
+   ```
+
+3. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+   *Note: On Windows, ensure you have Npcap installed for packet capture.*
+
+## 🏃 Usage
+Run the main script:
+```bash
+python pearcer.py
+```
+- **Live Capture**: Select your interface from the list.
+- **Android Capture**: Go to `Capture -> From Android Device...`.
+- **Decoder**: Use the `Decoder` tab for crypto operations.
+- **Analytics**: Switch to the Analytics tab for graphs.
+
+## 🤝 Contributing
+Contributions are welcome! Please feel free to open issues or submit pull requests.
+
+## 📄 License
+GPL-3.0# Pearcer
