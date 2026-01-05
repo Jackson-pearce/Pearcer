@@ -4088,18 +4088,27 @@ def main_gui():
     def update_packet_list_gui():
         """Update packet list from batch queue (Main Thread)"""
         if running or (GUI_AVAILABLE and 'packet_batch' in globals() and packet_batch):
-            # Update process mapping occasionally
+            # Update process mapping occasionally (Threaded)
             if GUI_AVAILABLE: 
                 try:
-                    update_process_mapping() 
+                    # Run in thread if time due
+                    if time.time() - last_process_map_update >= 15.0:
+                        threading.Thread(target=update_process_mapping, daemon=True).start()
                 except: 
                     pass
             
             current_batch = []
             with packet_batch_lock:
                 if packet_batch:
-                    current_batch = packet_batch[:]
-                    packet_batch.clear()
+                    # OPTIMIZATION: Process max 50 packets per UI cycle to prevent freezing
+                    # If backlog is huge (>1000), clear older ones to catch up
+                    if len(packet_batch) > 1000:
+                         # Drop old packets, keep newest 500
+                         del packet_batch[:-500]
+                    
+                    limit = 50
+                    current_batch = packet_batch[:limit]
+                    del packet_batch[:limit]
             
             for row in current_batch:
                 # Add Process info if available (Local Traffic)
@@ -4964,17 +4973,32 @@ def main_gui():
 
         def update_graph_loop():
             try:
+                # OPTIMIZATION: Only draw if Viz tab is actually selected
+                # This prevents lagging when viewing packet list
+                is_visible = False
+                try:
+                    # Note: notebook lookup depends on variable availability
+                    if 'notebook' in globals() and 'viz_tab' in globals():
+                         current = notebook.select()
+                         # We need to check if 'viz_tab' ID matches current tab ID
+                         # Tkinter ids are strings.
+                         if str(viz_tab) in str(current):
+                             is_visible = True
+                except:
+                    pass
+
+                if not is_visible:
+                    # Skip drawing, just reschedule
+                    root.after(2000, update_graph_loop)
+                    return
+
                 if G is not None and G.number_of_nodes() > 0:
-                    # Limit to last 50 nodes for performance
-                    if G.number_of_nodes() > 50:
-                        # Remove oldest nodes (not tracking timestamps efficiently here, just random for now)
-                        pass 
-                        
+                    # ... drawing logic ...
                     ax.clear()
                     ax.set_facecolor('#1e1e1e')
                     
-                    # Layout
-                    pos = nx.spring_layout(G, seed=42, k=0.3, iterations=20)
+                    # Layout (Reduce iterations for speed)
+                    pos = nx.spring_layout(G, seed=42, k=0.3, iterations=10) # Reduced from 20
                     
                     # Draw
                     nx.draw_networkx_nodes(G, pos, ax=ax, node_size=300, node_color='#00ff00', alpha=0.8)
