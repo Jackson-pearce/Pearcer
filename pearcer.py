@@ -4917,6 +4917,37 @@ def main_gui():
     proxy_log.pack(fill='both', expand=True)
 
 
+    
+    def update_statistics():
+        """Update GUI statistics labels"""
+        try:
+            # Update main stats label
+            if 'stats_label' in locals() or 'stats_label' in globals():
+                stats_label.config(text=f"PPS: {int(stats['pps'])} | Attacks: {stats['attacks']} | Vulns: {stats['vulnerabilities']} | Exploits: {stats['exploits']} | Malware: {stats['malware']}")
+            
+            # Update status bar
+            if 'status_bar' in locals() or 'status_bar' in globals():
+                status_bar.config(text=f"Captured: {packet_count} | Mode: {config['capture_mode']} | Filter: {config['filter'] or 'None'}")
+            
+        except Exception as e:
+            pass
+        
+        # Schedule next update
+        if VIZ_AVAILABLE:
+            try:
+                # Trigger graph update if available
+                # update_graph_loop schedules itself now, but we can keep this as a keep-alive fallback?
+                # Actually, step 2804 removed root.after from update_graph_loop? No, step 2853 re-added it properly.
+                # So we DONT need to call it here constantly.
+                pass
+            except:
+                pass 
+        
+        try:
+            root.after(1000, update_statistics)
+        except:
+            pass
+
     # Graph Tab
     if VIZ_AVAILABLE:
         graph_tab = tk.Frame(notebook)
@@ -4941,34 +4972,9 @@ def main_gui():
         canvas = FigureCanvasTkAgg(fig, master=graph_tab)
         canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
         
-        def update_statistics():
-            """Update GUI statistics labels"""
-            try:
-                # DEBUG START
-                # print(f"[DEBUG] running={running}, queue={packet_queue.qsize()}, batch={len(packet_batch) if 'packet_batch' in globals() else 'N/A'}")
-                # DEBUG END
-
-                # Update main stats label
-                if 'stats_label' in locals() or 'stats_label' in globals():
-                    stats_label.config(text=f"PPS: {int(stats['pps'])} | Attacks: {stats['attacks']} | Vulns: {stats['vulnerabilities']} | Exploits: {stats['exploits']} | Malware: {stats['malware']}")
-                
-                # Update status bar
-                if 'status_bar' in locals() or 'status_bar' in globals():
-                    status_bar.config(text=f"Captured: {packet_count} | Mode: {config['capture_mode']} | Filter: {config['filter'] or 'None'}")
-                
-            except Exception as e:
-                pass
-            
-            # Schedule next update
-            try:
-                root.after(2000, update_graph_loop)
-            except:
-                pass # Print error to see if stats is crashing
-            
-            # Schedule next update
-            try:
-                root.after(1000, update_statistics)
-            except:
+        if VIZ_AVAILABLE:
+            def update_graph_loop():
+                # ... existing graph loop ...
                 pass
 
         def update_graph_loop():
