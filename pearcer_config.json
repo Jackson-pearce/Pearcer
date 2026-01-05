@@ -30,5 +30,7 @@
         "websocket": true,
         "sip": true
     },
-    "filter_mode": "All traffic"
+    "filter_mode": "All traffic",
+    "headless": false,
+    "remote_port": 9999
 }

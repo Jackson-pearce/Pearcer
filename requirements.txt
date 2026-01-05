@@ -1,41 +1,25 @@
 # Pearcer - Professional Packet Analyzer
-# Python Dependencies
-
 # Core packet capture and analysis
 scapy>=2.5.0
 pyshark>=0.6.0
 
-# Network scanning (port scanning, service detection)
+# Network scanning & Utilities
 python-nmap>=0.7.1
+psutil>=5.9.0
 
-# GUI
-tk>=0.1.0
-
-# Real Cybersecurity Scanning (NEW)
-# ================================
-
-# NVD CVE Database Integration
+# Security & Data
 nvdlib>=0.7.4
-
-# OWASP ZAP Web Security Scanner
-python-owasp-zap-v2.4>=0.0.22
-
-# WHOIS Lookups
+python-owasp-zap-v2.4>=0.0.22  # Optional for advanced scanning
 python-whois>=0.8.0
-
-# Enhanced DNS Operations
 dnspython>=2.3.0
+cryptography>=41.0.0
 
-# HTTP Operations
+# HTTP & Networking
 requests>=2.28.0
 urllib3>=1.26.0
 
-# SSL/TLS Certificate Analysis
-cryptography>=41.0.0
-
-# Data Processing
+# Visualization & GUI
+tk>=0.1.0
+matplotlib>=3.7.0
+networkx>=3.0
 python-dateutil>=2.8.2
-
-# Optional but Recommended
-# ========================
-# psutil  # For process information ("wavelength" feature)

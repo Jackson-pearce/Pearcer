@@ -1,0 +1,101 @@
+{
+    "interface": "\\Device\\NPF_{3AC70607-0EA1-498F-9E50-C9BBC09531D1}",
+    "filter": "",
+    "blacklist_ips": [
+        "8.8.8.8"
+    ],
+    "whitelist_ips": [],
+    "attack_threshold": 50,
+    "filter_mode": "All traffic",
+    "highlight_colors": {
+        "normal": [
+            "#FFFFFF",
+            "#1E1E1E"
+        ],
+        "tcp": [
+            "#000000",
+            "#E6E6FA"
+        ],
+        "tcp_syn": [
+            "#000000",
+            "#A0A0A0"
+        ],
+        "udp": [
+            "#000000",
+            "#dae8fc"
+        ],
+        "http": [
+            "#000000",
+            "#d5e8d4"
+        ],
+        "dns": [
+            "#000000",
+            "#dae8fc"
+        ],
+        "error": [
+            "#FFFFFF",
+            "#800000"
+        ],
+        "warning": [
+            "#000000",
+            "#ffffcc"
+        ],
+        "note": [
+            "#000000",
+            "#d5e8d4"
+        ],
+        "smb": [
+            "#000000",
+            "#fff2cc"
+        ],
+        "routing": [
+            "#000000",
+            "#f8cecc"
+        ],
+        "suspicious": [
+            "#000000",
+            "#ffe6cc"
+        ],
+        "attack": [
+            "#FFFFFF",
+            "#FF0000"
+        ],
+        "voip": [
+            "#000000",
+            "#dae8fc"
+        ],
+        "encrypted": [
+            "#000000",
+            "#f5f5f5"
+        ],
+        "tls": [
+            "#000000",
+            "#e1d5e7"
+        ]
+    },
+    "log_file": "packets.log",
+    "pcap_file": "capture.pcap",
+    "speed": "normal",
+    "theme": "dark",
+    "auto_vuln_scan": false,
+    "protocols": {
+        "tcp": true,
+        "udp": true,
+        "icmp": true,
+        "dccp": true,
+        "tls": true,
+        "http": true,
+        "quic": true,
+        "websocket": true,
+        "sip": true
+    },
+    "nvd_api_key": null,
+    "zap_api_key": null,
+    "zap_proxy": "http://127.0.0.1:8090",
+    "enable_zap_scanning": false,
+    "cve_cache_dir": "nvd_cache.json",
+    "packet_queue_size": 10000,
+    "max_captured_packets": 100000,
+    "max_decrypted_items": 10000,
+    "interfaces_cache_ttl": 5
+}
